@@ -7,6 +7,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from .onnx_session import create_session
+
 
 class YOLOXONNX:
     """YOLOX person detector using ONNX Runtime.
@@ -22,30 +24,13 @@ class YOLOXONNX:
     nms_thr : float
         NMS IoU threshold.
     device : str
-        "cuda:N", "cuda" or "cpu".
+        "cuda:N", "cuda" or "cpu". CUDA falls back to CPU with a printed
+        message when ONNXRuntime cannot use it.
     """
 
     def __init__(self, onnx_path, input_size=(640, 640), score_thr=0.5, nms_thr=0.45, device="cpu"):
-        import onnxruntime as ort
-
-        if device == "cpu":
-            providers = ["CPUExecutionProvider"]
-        elif device == "cuda" or device.startswith("cuda:"):
-            if "CUDAExecutionProvider" not in ort.get_available_providers():
-                raise RuntimeError("CUDA detection requires ONNXRuntime with CUDAExecutionProvider")
-            device_id = 0 if device == "cuda" else int(device.split(":")[1])
-            providers = [
-                ("CUDAExecutionProvider", {"device_id": device_id}),
-                "CPUExecutionProvider",
-            ]
-        else:
-            raise ValueError("YOLOX device must be cpu, cuda, or cuda:N")
-        options = ort.SessionOptions()
-        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self.sess = ort.InferenceSession(str(onnx_path), sess_options=options, providers=providers)
+        self.sess = create_session(onnx_path, device, "YOLOX")
         self.execution_providers = self.sess.get_providers()
-        if device != "cpu" and "CUDAExecutionProvider" not in self.execution_providers:
-            raise RuntimeError("ONNXRuntime did not activate the requested CUDA provider")
         self.input_size = input_size
         self.score_thr = score_thr
         self.nms_thr = nms_thr

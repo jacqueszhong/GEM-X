@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
+from .onnx_session import create_session
+
 HAND_SIDES = {1: "left", 2: "right"}
 INPUT_SIZE = 640
 
@@ -96,28 +98,9 @@ class RTDETRHandONNX:
         min_size=0.0,
         clip=True,
     ):
-        import onnxruntime as ort
-
-        if device == "cpu":
-            providers = ["CPUExecutionProvider"]
-        elif device == "cuda" or device.startswith("cuda:"):
-            if "CUDAExecutionProvider" not in ort.get_available_providers():
-                raise RuntimeError("CUDA detection requires ONNXRuntime with CUDAExecutionProvider")
-            device_id = 0 if device == "cuda" else int(device.split(":")[1])
-            providers = [
-                ("CUDAExecutionProvider", {"device_id": device_id}),
-                "CPUExecutionProvider",
-            ]
-        else:
-            raise ValueError("Hand detector device must be cpu, cuda, or cuda:N")
-        options = ort.SessionOptions()
-        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self.session = ort.InferenceSession(
-            str(onnx_path), sess_options=options, providers=providers
-        )
+        # CUDA falls back to CPU with a printed message when ONNXRuntime cannot use it.
+        self.session = create_session(onnx_path, device, "Hand detector")
         self.execution_providers = self.session.get_providers()
-        if device != "cpu" and "CUDAExecutionProvider" not in self.execution_providers:
-            raise RuntimeError("ONNXRuntime did not activate the requested CUDA provider")
         self.score_thr = score_thr
         self.top1_per_class = top1_per_class
         self.pad, self.square, self.min_size, self.clip = pad, square, min_size, clip
