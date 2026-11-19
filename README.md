@@ -97,37 +97,101 @@ See [Model Overview](docs/MODEL_OVERVIEW.md) for architecture and output convent
 
 ## 🚀 Quick Start
 
+> **Fork note ([jacqueszhong/GEM-X](https://github.com/jacqueszhong/GEM-X)).** Steps 1–2
+> below were rewritten into one tested command sequence (uv, Linux x86-64 + CUDA,
+> Body Motion workflow). They fix gaps in the upstream instructions: there was no PyTorch
+> command, `python -m pip` fails in a uv venv, the `render` extra and `huggingface_hub`
+> were missing, and the YOLOX zip was left behind. [FORK.md](FORK.md) lists those issues
+> and the fork's other changes.
+
 ### 1. Install
 
-Use Python 3.10 or newer and install a PyTorch 2.10 build for your device. From
-this checkout:
+Python 3.12 with [uv](https://docs.astral.sh/uv/). Clone with the soma-retargeter
+submodule (or run `git submodule update --init` in an existing clone):
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-# Install the PyTorch build for your CPU or CUDA environment before this step.
-python -m pip install -e '.[video,hand]'
+git clone --recurse-submodules git@github.com:jacqueszhong/GEM-X.git GEM-X-unified
+cd GEM-X-unified
+
+uv venv .venv --python 3.12
+source .venv/bin/activate        # uv venvs have no pip: use `uv pip`, never `python -m pip`
+
+# PyTorch first. The PyPI default CUDA wheel works on recent drivers (tested:
+# torch 2.15.0+cu132, driver 580 / CUDA 13.0). On older drivers, pick the
+# matching --index-url from https://pytorch.org/get-started/locally/.
+uv pip install torch
+
+# GEM with the person detector (video) and renderer (render) extras; huggingface_hub provides `hf`.
+uv pip install -e '.[video,render]' huggingface_hub
+# Optional GPU person detector: replace the CPU onnxruntime wheel, since both provide `onnxruntime`.
+uv pip uninstall onnxruntime && uv pip install onnxruntime-gpu
+
+# soma-retargeter (BVH/skeleton tools, G1 retargeting). The fork's relaxed pins
+# install it without downgrading the packages above.
+uv pip install -e third_party/soma-retargeter
+
+uv pip check                     # expect: All installed packages are compatible
 ```
 
-Install FFmpeg for video processing. For the rendering commands below, install
-`python -m pip install -e '.[render]'` and the
-[rendering dependencies](docs/INSTALL.md#rendering-dependencies) in a Linux x86-64
-environment. See [Installation](docs/INSTALL.md) for CPU/CUDA setup, Docker,
-ARM64 inference, and optional dependencies.
+System packages for video I/O and headless rendering (Debian/Ubuntu):
+`sudo apt-get install ffmpeg libegl-mesa0 libgl1-mesa-dri`.
+
+Set this in every shell that runs `gem-infer` or `gem-render`. The upstream docs only
+mention it for Docker and conda/NGC, but it is what makes the explicit IEEE precision
+settings of the geometry and IK code take effect:
+
+```bash
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
+```
+
+See [Installation](docs/INSTALL.md) for CPU-only setups, Docker, ARM64 and the other
+extras (`hand`, `train`, `eval`, `dev`).
 
 ### 2. Prepare weights and assets
 
-GEM installs the SOMA 0.3.3 Python runtime. Download the model and geometry files
-separately, following the instructions for your task:
+`py-soma-x==0.3.3` is already installed by step 1. Download the geometry and model
+files (about 7.5 GB; `assets/soma/` and `weights/` are git-ignored):
 
-1. Download the [model checkpoints](docs/PRETRAINED_MODELS.md#download-checkpoints)
-   into `weights/`.
-2. For automatic Body Pose or Body Motion, download and extract the
-   [YOLOX person detector](docs/PRETRAINED_MODELS.md#person-detector-for-body-motion)
-   to `weights/yolox_humanart.onnx`.
-3. Download the [SOMA v0.3.3 assets](docs/INSTALL.md#soma-code-and-assets)
-   into `assets/soma/`. The examples below use that directory.
+```bash
+# SOMA v0.3.3 body assets (+ correctives for Body Pose and mesh rendering)
+hf download nvidia/SOMA-X \
+  SOMA_neutral.npz SOMA_template_rig.usda SOMA_procedural_transforms.json \
+  --revision v0.3.3 --local-dir assets/soma
+hf download nvidia/SOMA-X correctives_model.pt --revision v0.3.3 --local-dir assets/soma
+
+# Body Pose + Body Motion (native77) checkpoints
+hf download nvidia/GEM-X motion_native77_e774_s292175.ckpt \
+  motion_stats_raw.npz motion_native77.yaml --local-dir weights
+hf download nvidia/GEM-X body_s240000.ckpt vitpose.pth \
+  body_video_native77.yaml --local-dir weights
+
+# YOLOX person detector -> weights/yolox_humanart.onnx
+curl --fail --location \
+  https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip \
+  --output weights/yolox_humanart.zip
+python - <<'PY'
+from pathlib import Path
+from shutil import copyfileobj
+from zipfile import ZipFile
+with ZipFile("weights/yolox_humanart.zip") as archive:
+    member = next(name for name in archive.namelist() if name.endswith("/end2end.onnx"))
+    with archive.open(member) as source, Path("weights/yolox_humanart.onnx").open("wb") as target:
+        copyfileobj(source, target)
+PY
+rm weights/yolox_humanart.zip
+```
+
+Check the install:
+
+```bash
+python -c "import torch, gem, soma, soma_retargeter, onnxruntime; print(torch.cuda.is_available(), onnxruntime.get_available_providers())"
+gem-infer --help && gem-render --help
+```
+
+Hand Pose needs extra files: the `SOMAHand.npz` and `MHR/` assets
+([SOMA assets](docs/INSTALL.md#soma-code-and-assets)), the gated EgoHand checkpoint and
+the RT-DETR hand detector ([download commands](docs/PRETRAINED_MODELS.md#download-checkpoints)).
+It also needs the `hand` extra: `uv pip install -e '.[video,render,hand]'`.
 
 ### 3. Run inference
 
@@ -166,22 +230,29 @@ pinhole/fisheye inputs are covered in the [Hand inference guide](docs/DEMO.md#ha
 
 **Body Motion — video**
 
-Configure the local model paths and 2D keypoint detector identifier in
-[`body_video_native77.yaml`](docs/configs/body_video_native77.yaml), then run:
+[`body_video_native77.yaml`](docs/configs/body_video_native77.yaml) already points at
+the `weights/` files from step 2, so it works without edits. Run:
 
 ```bash
 gem-infer motion-video --task body --input video.mp4 \
   --config docs/configs/body_video_native77.yaml --device cuda \
+  --camera-mode static \
   --postprocess --soma-assets assets/soma --output motion.pt
 gem-render --task body --input motion.pt --soma-assets assets/soma \
   --device cuda --output-dir outputs/motion
 ```
 
+**Choose `--camera-mode` explicitly.** Without it, the config's default `background` is used,
+which estimates camera rotation from background features. That can error out when there
+is too little background texture, and it adds estimation noise that a fixed camera doesn't need.
+- `static`: fixed camera (tripod), as above.
+- `vipe`: moving camera; follow the [optional ViPE setup](docs/VIPE_CAMERA.md).
+- `background`: moving camera without ViPE.
+
 Body Motion produces camera and world views. This example uses `--postprocess`
-for the Contact/IK correction shown in the films; omit it for raw predictions.
-For a moving camera, add `--camera-mode vipe` and follow the
-[optional ViPE setup](docs/VIPE_CAMERA.md). For a fixed camera, use
-`--camera-mode static`.
+for the Contact/IK correction shown in the films; omit it for raw predictions. To
+re-run Contact/IK without repeating inference, save the raw result and post-process it
+separately: `gem-infer motion-cache --task body --input raw.pt --postprocess --soma-assets assets/soma --output motion.pt`.
 The [Inference guide](docs/DEMO.md) explains input formats, output fields, cached
 prediction, camera handling, and postprocessing.
 
