@@ -91,7 +91,6 @@ def _metadata(path):
             "duration": frames.frame_count / frames.fps,
         }
 
-
 def normalize_video(input_path, output_path, *, start=0.0, duration=None):
     """Convert an explicit source interval to 30 FPS H.264/YUV420P.
 
